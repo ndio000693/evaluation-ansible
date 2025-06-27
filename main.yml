@@ -1,0 +1,9 @@
+mariadb_root_pass: examplerootPW
+wp_db_name: wordpress
+wp_user: example
+wp_pass: examplePW
+
+apache_service: "{{ 'apache2' if ansible_facts['os_family'] == 'Debian' else 'httpd' }}"
+apache_conf_path: "{{ '/etc/apache2/sites-available/wordpress.conf' if ansible_facts['os_family'] == 'Debian' else '/etc/httpd/conf.d/wordpress.conf' }}"
+apache_owner: "{{ 'www-data' if ansible_facts['os_family'] == 'Debian' else 'apache' }}"
+

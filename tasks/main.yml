@@ -1,20 +1,28 @@
 
+
 - name: Mettre à jour les paquets
+  package:
+    name: "*"
+    state: latest
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: Mettre à jour les paquets (Debian)
   apt:
     update_cache: yes
+  when: ansible_facts['os_family'] == "Debian"
 
 - name: Installer les paquets nécessaires
-  apt:
-    name:
-      - apache2
-      - php
-      - libapache2-mod-php
-      - php-mysql
-      - mariadb-server
-      - wget
-      - unzip
+  package:
+    name: "{{ item }}"
     state: present
-    update_cache: yes
+  loop: >-
+    {{
+      (
+        ['apache2', 'php', 'libapache2-mod-php', 'php-mysql', 'mariadb-server', 'wget', 'unzip', 'python3-pymysql']
+        if ansible_facts['os_family'] == 'Debian'
+        else ['httpd', 'php', 'php-mysqlnd', 'mariadb-server', 'wget', 'unzip', 'python3-PyMySQL']
+      )
+    }}
 
 - name: Supprimer la page par défaut d'Apache
   file:
@@ -23,20 +31,68 @@
 
 - name: Démarrer et activer Apache
   service:
-    name: apache2
-    state: restarted
+    name: "{{ apache_service }}"
+    state: started
     enabled: true
+  when: ansible_facts['os_family'] == "Debian"
+
+
+- name: Installer Apache sur Rocky
+  dnf:
+    name: httpd
+    state: present
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: Install HTTPD package
+  package:
+    name: httpd
+    state: present
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: Démarrer Apache manuellement dans un conteneur rocky
+  shell: /usr/sbin/httpd -k start
+  args:
+    executable: /bin/bash
+  when: ansible_facts['os_family'] == "RedHat"
+
+
 
 - name: Démarrer et activer MariaDB
   service:
     name: mariadb
     state: started
     enabled: true
+  when: ansible_facts['os_family'] == "Debian"
 
-- name: Installer le module PyMySQL pour Python 3
-  apt:
-    name: python3-pymysql
+- name: Démarrer MariaDB avec socket explicite (Debian)
+  shell: |
+    /usr/sbin/mysqld --skip-grant-tables --socket=/run/mysqld/mysqld.sock --user=mysql &
+  args:
+    executable: /bin/bash
+  async: 10
+  poll: 0
+  become: true
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Attendre que le socket MariaDB soit disponible (Debian)
+  wait_for:
+    path: /run/mysqld/mysqld.sock
     state: present
+    timeout: 20
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Définir un mot de passe root via socket Unix (Debian)
+  shell: |
+    mysql -u root --socket=/run/mysqld/mysqld.sock <<EOF
+    ALTER USER 'root'@'localhost' IDENTIFIED BY 'examplerootPW';
+    FLUSH PRIVILEGES;
+    EOF
+  args:
+    executable: /bin/bash
+  become: true
+  when: ansible_facts['os_family'] == "Debian"
+  ignore_errors: true
+
 
 - name: Définir un mot de passe root pour MariaDB
   shell: |
@@ -46,39 +102,150 @@
     EOF
   args:
     executable: /bin/bash
+  when: ansible_facts['os_family'] == "Debian"
+  ignore_errors: true
 
 
-- name: Supprimer les utilisateurs anonymes
+
+
+
+- name: Initialiser MariaDB manuellement si nécessaire
+  shell: |
+    rm -rf /var/lib/mysql/*
+    mariadb-install-db --user=mysql --basedir=/usr --datadir=/var/lib/mysql
+  args:
+    executable: /bin/bash
+  become: true
+
+- name: Démarrer MariaDB sans vérification des privilèges
+  shell: |
+    /usr/libexec/mysqld --skip-grant-tables --skip-networking --user=mysql &
+  args:
+    executable: /bin/bash
+  async: 10
+  poll: 0
+  become: true
+
+- name: Démarrer MariaDB sans désactiver le réseau
+  shell: |
+    /usr/libexec/mysqld --skip-grant-tables --user=mysql &
+  args:
+    executable: /bin/bash
+  async: 10
+  poll: 0
+  become: true
+
+
+- name: Définir un mot de passe root sans authentification
+  shell: |
+    mysql -u root <<EOF
+    FLUSH PRIVILEGES;
+    ALTER USER 'root'@'localhost' IDENTIFIED BY 'examplerootPW';
+    FLUSH PRIVILEGES;
+    EOF
+  args:
+    executable: /bin/bash
+  become: true
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: Définir un mot de passe root via socket Unix (Ubuntu)
+  shell: |
+    mysql -u root --socket=/run/mysqld/mysqld.sock <<EOF
+    ALTER USER 'root'@'localhost' IDENTIFIED BY 'examplerootPW';
+    FLUSH PRIVILEGES;
+    EOF
+  args:
+    executable: /bin/bash
+  become: true
+  when: ansible_facts['os_family'] == "Debian"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+- name: Supprimer les utilisateurs anonymes pour Debian
   mysql_user:
     name: ''
     host_all: yes
     state: absent
     login_user: root
-    login_password: examplerootPW
+    login_password: "{{ mariadb_root_pass }}"
+  when: ansible_facts['os_family'] == "Debian"
+
+
+- name: Supprimer les utilisateurs anonymes via socket pour Rocky
+  community.mysql.mysql_user:
+    name: ''
+    host_all: true
+    state: absent
+    login_user: root
+    login_password: "{{ mariadb_root_pass }}"
+    login_unix_socket: /var/lib/mysql/mysql.sock
+  become: true
+  when: ansible_facts['os_family'] == "RedHat"
+
+
+
 
 - name: Supprimer la base de test
   mysql_db:
     name: test
     state: absent
     login_user: root
-    login_password: examplerootPW
+    login_password: "{{ mariadb_root_pass }}"
+  when: ansible_facts['os_family'] == "Debian"
+
 
 - name: Créer la base de données WordPress
   mysql_db:
-    name: wordpress
+    name: "{{ wp_db_name }}"
     state: present
     login_user: root
-    login_password: examplerootPW
+    login_password: "{{ mariadb_root_pass }}"
+  when: ansible_facts['os_family'] == "Debian"
+
+
+- name: Créer la base de données WordPress (Rocky)
+  mysql_db:
+    name: "{{ wp_db_name }}"
+    state: present
+    login_user: root
+    login_password: "{{ mariadb_root_pass }}"
+    login_unix_socket: /var/lib/mysql/mysql.sock
+  when: ansible_facts['os_family'] == "RedHat"
 
 - name: Créer l'utilisateur WordPress
   mysql_user:
-    name: example
-    password: examplePW
-    priv: 'wordpress.*:ALL'
+    name: "{{ wp_user }}"
+    password: "{{ wp_pass }}"
+    priv: "{{ wp_db_name }}.*:ALL"
     host: localhost
     state: present
     login_user: root
-    login_password: examplerootPW
+    login_password: "{{ mariadb_root_pass }}"
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Créer l'utilisateur WordPress (Rocky)
+  mysql_user:
+    name: "{{ wp_user }}"
+    password: "{{ wp_pass }}"
+    priv: "{{ wp_db_name }}.*:ALL"
+    host: localhost
+    state: present
+    login_user: root
+    login_password: "{{ mariadb_root_pass }}"
+    login_unix_socket: /var/lib/mysql/mysql.sock
+  when: ansible_facts['os_family'] == "RedHat"
+
 
 - name: Télécharger WordPress
   get_url:
@@ -95,8 +262,8 @@
 - name: Définir les permissions WordPress
   file:
     path: /var/www/html/
-    owner: www-data
-    group: www-data
+    owner: "{{ apache_owner }}"
+    group: "{{ apache_owner }}"
     recurse: yes
     mode: '0755'
 
@@ -106,26 +273,24 @@
     dest: /var/www/html/wordpress/wp-config.php
     remote_src: yes
 
-- name: Configurer wp-config.php - DB_NAME
-  shell: sed -i "s/database_name_here/wordpress/" /var/www/html/wordpress/wp-config.php
-
-- name: Configurer wp-config.php - DB_USER
-  shell: sed -i "s/username_here/example/" /var/www/html/wordpress/wp-config.php
-
-- name: Configurer wp-config.php - DB_PASSWORD
-  shell: sed -i "s/password_here/examplePW/" /var/www/html/wordpress/wp-config.php
-
+- name: Configurer wp-config.php
+  shell: |
+    sed -i "s/database_name_here/{{ wp_db_name }}/" /var/www/html/wordpress/wp-config.php
+    sed -i "s/username_here/{{ wp_user }}/" /var/www/html/wordpress/wp-config.php
+    sed -i "s/password_here/{{ wp_pass }}/" /var/www/html/wordpress/wp-config.php
+  args:
+    executable: /bin/bash
 
 - name: Régler les droits sur wp-config.php
   file:
     path: /var/www/html/wordpress/wp-config.php
-    owner: www-data
-    group: www-data
+    owner: "{{ apache_owner }}"
+    group: "{{ apache_owner }}"
     mode: '0640'
 
 - name: Créer la configuration Apache pour WordPress
   copy:
-    dest: /etc/apache2/sites-available/wordpress.conf
+    dest: "{{ apache_conf_path }}"
     content: |
       <VirtualHost *:80>
           ServerAdmin admin@localhost
@@ -133,16 +298,17 @@
           <Directory /var/www/html/wordpress>
               AllowOverride All
           </Directory>
-          ErrorLog ${APACHE_LOG_DIR}/error.log
-          CustomLog ${APACHE_LOG_DIR}/access.log combined
+          ErrorLog logs/wordpress_error.log
+          CustomLog logs/wordpress_access.log combined
       </VirtualHost>
 
-- name: Activer le site WordPress
+- name: Activer le site WordPress (Debian)
   command: a2ensite wordpress.conf
+  when: ansible_facts['os_family'] == "Debian"
   notify: Reload Apache
 
-- name: Activer le module rewrite
+- name: Activer le module rewrite (Debian)
   command: a2enmod rewrite
+  when: ansible_facts['os_family'] == "Debian"
   notify: Reload Apache
-
 
