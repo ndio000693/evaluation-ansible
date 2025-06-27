@@ -1,0 +1,148 @@
+
+- name: Mettre à jour les paquets
+  apt:
+    update_cache: yes
+
+- name: Installer les paquets nécessaires
+  apt:
+    name:
+      - apache2
+      - php
+      - libapache2-mod-php
+      - php-mysql
+      - mariadb-server
+      - wget
+      - unzip
+    state: present
+    update_cache: yes
+
+- name: Supprimer la page par défaut d'Apache
+  file:
+    path: /var/www/html/index.html
+    state: absent
+
+- name: Démarrer et activer Apache
+  service:
+    name: apache2
+    state: restarted
+    enabled: true
+
+- name: Démarrer et activer MariaDB
+  service:
+    name: mariadb
+    state: started
+    enabled: true
+
+- name: Installer le module PyMySQL pour Python 3
+  apt:
+    name: python3-pymysql
+    state: present
+
+- name: Définir un mot de passe root pour MariaDB
+  shell: |
+    mysql -u root <<EOF
+    ALTER USER 'root'@'localhost' IDENTIFIED BY 'examplerootPW';
+    FLUSH PRIVILEGES;
+    EOF
+  args:
+    executable: /bin/bash
+
+
+- name: Supprimer les utilisateurs anonymes
+  mysql_user:
+    name: ''
+    host_all: yes
+    state: absent
+    login_user: root
+    login_password: examplerootPW
+
+- name: Supprimer la base de test
+  mysql_db:
+    name: test
+    state: absent
+    login_user: root
+    login_password: examplerootPW
+
+- name: Créer la base de données WordPress
+  mysql_db:
+    name: wordpress
+    state: present
+    login_user: root
+    login_password: examplerootPW
+
+- name: Créer l'utilisateur WordPress
+  mysql_user:
+    name: example
+    password: examplePW
+    priv: 'wordpress.*:ALL'
+    host: localhost
+    state: present
+    login_user: root
+    login_password: examplerootPW
+
+- name: Télécharger WordPress
+  get_url:
+    url: https://wordpress.org/latest.zip
+    dest: /tmp/latest.zip
+
+- name: Décompresser WordPress
+  unarchive:
+    src: /tmp/latest.zip
+    dest: /var/www/html/
+    remote_src: yes
+    creates: /var/www/html/wordpress
+
+- name: Définir les permissions WordPress
+  file:
+    path: /var/www/html/
+    owner: www-data
+    group: www-data
+    recurse: yes
+    mode: '0755'
+
+- name: Créer wp-config.php
+  copy:
+    src: /var/www/html/wordpress/wp-config-sample.php
+    dest: /var/www/html/wordpress/wp-config.php
+    remote_src: yes
+
+- name: Configurer wp-config.php - DB_NAME
+  shell: sed -i "s/database_name_here/wordpress/" /var/www/html/wordpress/wp-config.php
+
+- name: Configurer wp-config.php - DB_USER
+  shell: sed -i "s/username_here/example/" /var/www/html/wordpress/wp-config.php
+
+- name: Configurer wp-config.php - DB_PASSWORD
+  shell: sed -i "s/password_here/examplePW/" /var/www/html/wordpress/wp-config.php
+
+
+- name: Régler les droits sur wp-config.php
+  file:
+    path: /var/www/html/wordpress/wp-config.php
+    owner: www-data
+    group: www-data
+    mode: '0640'
+
+- name: Créer la configuration Apache pour WordPress
+  copy:
+    dest: /etc/apache2/sites-available/wordpress.conf
+    content: |
+      <VirtualHost *:80>
+          ServerAdmin admin@localhost
+          DocumentRoot /var/www/html/wordpress
+          <Directory /var/www/html/wordpress>
+              AllowOverride All
+          </Directory>
+          ErrorLog ${APACHE_LOG_DIR}/error.log
+          CustomLog ${APACHE_LOG_DIR}/access.log combined
+      </VirtualHost>
+
+- name: Activer le site WordPress
+  command: a2ensite wordpress.conf
+  notify: Reload Apache
+
+- name: Activer le module rewrite
+  command: a2enmod rewrite
+  notify: Reload Apache
+
+
